@@ -1,11 +1,11 @@
 #!/usr/bin/env ruby
 require 'RMagick'
 require 'phashion'
+require 'ruby-progressbar'
 
 # CHECK ARGUMENTS
 
-usage = "USAGE: #{__FILE__} <input-image-file> [<number-of-lines>] [<border-width>]\n"
-usage << "If <number-of-lines> is not specified, 15 is assumed.\n"
+usage = "USAGE: #{__FILE__} <input-image-file> <separator-image-file> [<border-width>]\n"
 usage << "If <border-width> is not specified, 0 is assumed.\n"
 usage << "On success, the script will output coordinates of each verse in sequential order"
 
@@ -15,7 +15,7 @@ if ARGV.length < 1 || ARGV.length > 3
 end
 
 infile = ARGV[0]
-nlines = (ARGV[1] || 15).to_i
+separator_filename = ARGV[1]
 border = ARGV[2].to_i
 
 unless File.exists?(infile)
@@ -24,15 +24,13 @@ unless File.exists?(infile)
   exit 2
 end
 
-if nlines == 0 || nlines > 100
-  $stderr.puts "<number-of-lines> should be from 1 to 100"
+unless File.exists?(separator_filename)
+  $stderr.puts "File not found: #{separator_filename}"
   $stderr.puts usage
   exit 3
 end
 
 # PROCESS INPUT
-
-$stderr.puts "Now processing #{infile} having #{nlines} lines, please be patient..."
 
 # load input-image-file
 
@@ -50,67 +48,53 @@ ext = img.format.downcase
 if border > 0
   # remove border
   img.crop!(border, border, img.columns - 2 * border, img.rows - 2 * border, true)
-  img.write("noborder.#{ext}")
+  img.write("#{infile}.noborder.#{ext}")
 end
 
-line_height = img.rows/nlines
-
-# if img.properties.length > 0
-#     $stderr.puts "   Properties:"
-#     img.properties { |name,value|
-#         $stderr.puts %Q|      #{name} = "#{value}"|
-#     }
-# end
-
-# TEMPORARY: GENERATE SEPARATOR BY SPLITTING INPUT IMAGE INTO LINES
-1.upto(nlines) {|n|
-  img.crop(0, line_height*(n-1), img.columns, line_height, true).write("line#{n}.#{ext}")
-}
-
-exit 0
-
 # read separator file
-separator_filename = File.expand_path("../separator2.#{ext}", __FILE__)
 separator = Magick::Image::read(separator_filename).first
 separator_ph = Phashion::Image.new(separator_filename)
 
+skip_y = (separator.rows * 1.0).round
+
 # search for verse separator
+
+matches = []
 
 Dir.mkdir("tmp") unless Dir.exists?("tmp")
 canvas = Magick::Draw.new
-# for each line
 y = 0
-nlines.times { |line|
-  $stderr.puts "Line #{line+1}"
-  # for each separator candidate
+pbar = ProgressBar.create(title: "Scanning", total: img.rows - separator.rows)
+while y < img.rows - separator.rows
+  pbar.progress = y
   x = img.columns - separator.columns
-  match_found = false # because matching is fuzzy, get only last match from a running sequence of matches
+  match_found_x = match_found_y = false # because matching is fuzzy, get only last match from a running sequence of matches
   while x >= 0 
     candidate = img.crop(x, y, separator.columns, separator.rows)
-    candidate_filename = "tmp/candidate_#{line}_#{'%03i' % x}.#{ext}"
+    candidate_filename = "tmp/candidate_#{'%05i' % y}_#{'%05i' % x}.#{ext}"
     candidate.write candidate_filename
     candidate_ph = Phashion::Image.new(candidate_filename)
 
-    # $stderr.puts candidate_ph.distance_from(separator_ph)
-    # if candidate_ph.duplicate?(separator_ph, :threshold => 20)
     if candidate_ph.duplicate?(separator_ph)
-      match_found = true
+      match_found_x = match_found_y = true
     else
-      if match_found  # last iteration was a match?
-        $stderr.puts "MATCH AT #{x+1}, #{y}"
+      if match_found_x  # last iteration was a match?
+        matches << [x+1, y]
         # overlay box
-        canvas.fill('red').fill_opacity(0.3).rectangle(x+1, y, x+1+separator.columns, y+line_height)
+        canvas.fill('red').fill_opacity(0.3).rectangle(x+1, y, x+1+separator.columns, y+separator.rows)
       end
-      File.unlink(candidate_filename)
-      match_found = false
+      # File.unlink(candidate_filename)
+      match_found_x = false
     end
-    # File.unlink(candidate_filename)
+    File.unlink(candidate_filename)
     x -= 1
   end
 
-  y += line_height  
-}
+  y += match_found_y ? skip_y : 1
+end
+pbar.finish
 canvas.draw(img)
-img.write("img2.#{ext}")
+img.write("#{infile}.out.#{ext}")
+
 
 Dir.rmdir("tmp") rescue "" # not empty
